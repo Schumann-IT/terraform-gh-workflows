@@ -1,0 +1,96 @@
+name: Validate terraform module
+
+on:
+  workflow_call:
+    inputs:
+      auto-commit:
+        description: 'Auto commit changes (on pull requests)'
+        type: string
+        default: 'yes'
+
+permissions:
+  contents: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ vars.TFLINT_VERSION && format('v{0}', vars.TFLINT_VERSION) || 'latest' }}
+
+      - name: Run TFLint
+        run: tflint -f compact
+
+  fmt:
+    if: ${{ github.event_name == 'pull_request' && inputs.auto-commit == 'yes' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TF_VERSION && vars.TF_VERSION || 'latest' }}
+
+      - name: Format code
+        run: |
+          terraform fmt -recursive -check || terraform fmt -recursive
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: terraform fmt'
+
+  check-fmt:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TF_VERSION && vars.TF_VERSION || 'latest' }}
+
+      - name: Check formatting
+        run: |
+          terraform fmt -recursive -check
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TF_VERSION && vars.TF_VERSION || 'latest' }}
+
+      - name: Init module
+        run: |
+          terraform init -backend=false
+
+      - name: Validate module
+        run: |
+          terraform validate
+
+  update-docs:
+    if: ${{ github.event_name == 'pull_request' && inputs.auto-commit == 'yes' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: terraform-docs/gh-actions@v1.2.0
+        with:
+          config-file: .terraform-docs.yml
+          fail-on-diff: false
+          git-push: true
+          git-commit-message: 'chore: update docs'
+
+  check-docs:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-docs/gh-actions@v1.2.0
+        with:
+          config-file: .terraform-docs.yml
+          fail-on-diff: true

@@ -1,0 +1,337 @@
+name: Show a plan from artifact
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        type: string
+      # can be 'upsert' or 'create'
+      # - upsert creates or updates a comment
+      # - create always creates a new comment
+      mode:
+        description: 'Mode'
+        required: false
+        type: string
+        default: 'upsert'
+      gh-token:
+        description: 'Github token to update PR comments'
+        required: false
+        type: string
+        default: ${{ secrets.GITHUB_TOKEN }}
+      report:
+        description: 'Weather to report plan result to slack'
+        required: false
+        type: string
+        default: 'no'
+      ssh-private-key:
+        description: 'SSH private key'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  create:
+    name: Show plan ${{ inputs.environment }}
+    outputs:
+      nocolor: ${{ steps.nocolor.outputs.stdout }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-plan
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TF_VERSION && vars.TF_VERSION || 'latest' }}
+      - if: ${{ inputs.ssh-private-key != '' }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ inputs.ssh-private-key }}
+
+      - name: Init
+        run: |
+          terraform init -backend=false
+
+      - name: Store
+        continue-on-error: true
+        run: |
+          terraform show ${{ inputs.environment }}-plan.tfplan > ${{ inputs.environment }}-show.txt
+          terraform show -json ${{ inputs.environment }}-plan.tfplan > ${{ inputs.environment }}-show.json
+
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: ${{ inputs.environment }}-show
+          path: ${{ inputs.environment }}-show*.*
+          if-no-files-found: 'ignore'
+
+      - name: Inline
+        continue-on-error: true
+        run: |
+          cat ${{ inputs.environment }}-show.txt
+
+      - name: PR
+        continue-on-error: true
+        id: nocolor
+        run: |
+          terraform show -no-color ${{ inputs.environment }}-plan.tfplan
+
+
+  # show the plan result as a comment on the pull request
+  pr:
+    name: Show plan on PR ${{ inputs.environment }}
+    if: ${{ always() && needs.create.result == 'success' && github.event_name == 'pull_request' }}
+    needs:
+      - create
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      # update or create a comment
+      - name: Upsert comment
+        if: ${{ always() && inputs.mode == 'upsert' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ inputs.gh-token }}
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes('### ${{ inputs.environment }} plan')
+            })
+
+            const output = `### ${{ inputs.environment }} plan
+            *Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            *Run ID: \`${{ github.run_id }}\`*
+            *Commit: \`${{ github.sha }}\`*
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*
+            *Artifacts:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/${{ needs.create.outputs.artifact-id }}
+            
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`\n
+            ${{ needs.create.outputs.nocolor }}
+            \`\`\`
+            
+            </details>`;
+            
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+
+      # always create a new comment
+      - name: Create comment
+        if: ${{ always() && inputs.mode == 'create' && steps.show.outcome == 'success' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ inputs.gh-token }}
+          script: |
+            const output = `### ${{ inputs.environment }} plan
+            *Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            *Commit: \`${{ github.sha }}\`*
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*
+            *Artifacts:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/${{ needs.create.outputs.artifact-id }}
+            
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`\n
+            ${{ needs.create.outputs.nocolor }}
+            \`\`\`
+            
+            </details>`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+  # report plan result to slack, only if notify once, right after the plan has been created
+  # if this job is showing a plan result from a previous run, the slack notification will be skipped
+  # pull request results will also be skipped
+  report:
+    name: Report plan results ${{ inputs.environment }}
+    needs:
+      - create
+    if: ${{ always() && inputs.report == 'yes' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-plan
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-show
+
+      - name: Create report
+        id: report
+        run: |
+          echo state=$(cat ${{ inputs.environment }}-plan-result.txt) >> $GITHUB_OUTPUT
+
+          if [ -f ${{ inputs.environment }}-show.json ]; then
+              cat ${{ inputs.environment }}-show.json | jq '.resource_changes[].change.actions[0]' | tr " " "\n" | sort | uniq -c | sort -k2nr > ${{ inputs.environment }}-plan-stats.txt
+
+              TO_CREATE=0
+              if cat ${{ inputs.environment }}-plan-stats.txt | grep create; then
+                TO_CREATE=$(cat ${{ inputs.environment }}-plan-stats.txt | grep create | awk '{print $1}')
+              fi
+          
+              TO_DELETE=0
+              if cat ${{ inputs.environment }}-plan-stats.txt | grep delete; then
+                TO_DELETE=$(cat ${{ inputs.environment }}-plan-stats.txt | grep delete | awk '{print $1}')
+              fi
+          
+              TO_UPDATE=0
+              if cat ${{ inputs.environment }}-plan-stats.txt | grep update; then
+                TO_UPDATE=$(cat ${{ inputs.environment }}-plan-stats.txt | grep update | awk '{print $1}')
+              fi
+          
+              NOOP=0
+              if cat ${{ inputs.environment }}-plan-stats.txt | grep "no-op"; then
+                NOOP=$(cat ${{ inputs.environment }}-plan-stats.txt | grep "no-op" | awk '{print $1}')
+              fi
+          
+              TOTAL=$(( TO_CREATE + TO_DELETE + TO_UPDATE + NOOP ))
+
+              echo create=$TO_CREATE >> $GITHUB_OUTPUT
+              echo delete=$TO_DELETE >> $GITHUB_OUTPUT
+              echo update=$TO_UPDATE >> $GITHUB_OUTPUT
+              echo noop=$NOOP >> $GITHUB_OUTPUT
+              echo total=$TOTAL >> $GITHUB_OUTPUT
+          fi         
+          
+          echo branches=$(git branch -a | grep remotes | grep -v HEAD | grep -v "${{ github.event.repository.default_branch }}" | wc -l) >> $GITHUB_OUTPUT
+          GITHUB_SHA=${{ github.sha }}
+          echo short_sha=${GITHUB_SHA::7} >> $GITHUB_OUTPUT
+
+      - name: Slack notify
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Terraform plan",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Event:*\n${{ github.event_name }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\n${{ inputs.environment }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Ref:*\n${{ github.ref }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Total resources:*\n${{ steps.report.outputs.total }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Active branches:*\n${{ steps.report.outputs.branches }}"
+                    }
+                  ]
+                },
+            	{
+                  "type": "divider"
+                },
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Plan results:"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Create:*\n${{ steps.report.outputs.create }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Update:*\n${{ steps.report.outputs.update }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Delete:*\n${{ steps.report.outputs.delete }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*No-Op:*\n${{ steps.report.outputs.noop }}"
+                    }
+                  ]
+                },
+            	{
+                  "type": "divider"
+                },            
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

@@ -1,0 +1,42 @@
+#
+# This workflow must be triggered manually
+# A run will plan or apply changes depending on inputs.
+#
+# To crete a fresh plan, just select branch and environment.
+# To apply a plan from a previous run, select apply and enter the run-id.
+#
+# NOTE: If a plan has already been created by a ci/ci job, you can use the run-id of that run to apply the plan,
+#       instead of creating a new plan.
+#
+
+name: Terraform Deployment
+
+run-name: ${{ (inputs.apply && inputs.run-id != '') && 'Deployment to' || 'Plan for' }} ${{ inputs.environment }} based on ${{ github.ref_name}}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        type: environment
+        default: ${{ vars.DEFAULT_ENVIRONMENT }}
+
+      run-id:
+        description: 'The run id of the plan run to apply'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  terraform:
+    uses: Schumann-IT/terraform-gh-workflows/.github/workflows/terraform.yaml@main
+    secrets: inherit
+    with:
+      environment: ${{ github.event.inputs.environment }}
+      mode: apply
+      run-id: ${{ github.event.inputs.run-id }}

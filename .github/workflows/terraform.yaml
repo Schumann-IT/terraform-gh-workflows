@@ -1,0 +1,306 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      # the environment to deploy to
+      # if set to 'all', the matrix for all available environments will be created
+      environment:
+        description: 'Environment'
+        required: false
+        type: string
+        default: ${{ vars.DEFAULT_ENVIRONMENT }}
+
+      # choices are 'validate', 'plan', 'apply' and 'output'
+      mode:
+        description: 'The deployment mode'
+        required: false
+        type: string
+        default: 'validate'
+
+      provider:
+        description: 'The terraform provider'
+        required: false
+        type: string
+        default: 'aws'
+
+      role:
+        description: 'Role name'
+        required: false
+        type: string
+
+      tf-init-args:
+        description: 'Terraform init arguments'
+        required: false
+        type: string
+        default: ''
+
+      tf-plan-args:
+        description: 'Terraform init arguments'
+        required: false
+        type: string
+        default: ''
+
+      exclude:
+        description: 'Comma separated list of regex patterns to exclude matching environments, ignored if mode is not set to apply and environment is not set to all'
+        required: false
+        type: string
+        default: ''
+
+      apply:
+        description: 'Comma separated list of regex patterns to include matching environments to apply, ignored if mode is not set to apply and environment is not set to all'
+        required: false
+        type: string
+        default: ''
+
+      apply-on-pr:
+        description: 'Comma separated list of regex patterns to include matching environments to apply on PR, ignored if mode is not set to apply and environment is not set to all'
+        required: false
+        type: string
+        default: ''
+
+      run-id:
+        description: 'The run id of the plan run to apply'
+        required: false
+        type: string
+        default: ''
+
+      comment-mode:
+        description: 'A PR comment can be updated (upsert) or a new comment can be created on every run (create)'
+        required: false
+        type: string
+        default: 'upsert'
+
+      report-plan-result:
+        description: 'Report the plan result'
+        required: false
+        type: string
+        default: 'no'
+
+      report-apply-result:
+        description: 'Report the apply result'
+        required: false
+        type: string
+        default: 'no'
+
+      report-output:
+        description: 'Report the output'
+        required: false
+        type: string
+        default: 'no'
+
+      # set to true to skip validation for faster builds when debugging
+      skip-validate:
+        description: 'Set to yes to skip validation'
+        required: false
+        type: string
+        default: 'no'
+
+      disable-auto-commit:
+        description: 'Set to yes to disable auto commit'
+        required: false
+        type: string
+        default: 'no'
+
+      ssh-private-key:
+        description: 'SSH private key'
+        required: false
+        type: string
+        default: ${{ secrets.SSH_PRIVATE_KEY }}
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  # create the environment matrix
+  matrix:
+    if: ${{ inputs.environment != '' && inputs.mode != 'validate' }}
+    runs-on: ubuntu-latest
+    outputs:
+      default_matrix: ${{ steps.set-matrix.outputs.default_matrix }}
+      apply_matrix: ${{ steps.set-matrix.outputs.apply_matrix }}
+      apply_on_pr: ${{ steps.set-matrix.outputs.apply_on_pr }}
+    steps:
+      - if: ${{ inputs.environment == 'all' }}
+        uses: actions/checkout@v4
+      - id: set-matrix
+        run: |
+          if [ "${{ inputs.environment }}" == "all" ]; then
+            if [[ "${{ inputs.run-id }}" != "" ]]; then
+              echo "ERROR: 'environment' must be set to a single environment when 'run-id' is set"
+              exit 1
+            fi
+
+            echo "INFO: detecting environments"
+
+            for f in $(ls *-*.tfvars); do
+              e=${f%.tfvars}
+              echo "INFO: found environment ${e}"
+              
+              include_default='yes'
+              for p in $(echo ${{ inputs.exclude }} | tr "," "\n"); do
+                if [[ "${e}" =~ ^${p}$ ]]; then
+                  include_default='no'
+                fi
+              done
+              if [ "${include_default}" == "yes" ]; then
+                if [ -n "${DEFAULT_LIST}" ]; then
+                  DEFAULT_LIST="${DEFAULT_LIST}, "
+                fi
+                DEFAULT_LIST="${DEFAULT_LIST}\"${e}\""
+            
+                include_apply='no'
+                for p in $(echo ${{ inputs.apply }} | tr "," "\n"); do
+                  if [[ "${e}" =~ ^${p}$ ]]; then          
+                    include_apply='yes'
+                  fi
+                done
+                if [ "${include_apply}" == "yes" ]; then 
+                  echo "INFO: including ${e} in apply"
+                  if [ -n "${APPLY_LIST}" ]; then
+                    APPLY_LIST="${APPLY_LIST}, "
+                  fi
+                  APPLY_LIST="${APPLY_LIST}\"${e}\""
+                  
+                  apply_on_pr='no'
+                  for p in $(echo ${{ inputs.apply-on-pr }} | tr "," "\n"); do
+                    if [[ "${e}" =~ ^${p}$ ]]; then
+                      apply_on_pr='yes'
+                    fi
+                  done
+                  if [ "${apply_on_pr}" == "yes" ]; then 
+                    echo "INFO: including ${e} in apply on pr"
+                    if [ -n "${APPLY_ON_PR_LIST}" ]; then
+                      APPLY_ON_PR_LIST="${APPLY_ON_PR_LIST},"
+                    fi
+                    APPLY_ON_PR_LIST="${APPLY_ON_PR_LIST}${e}"
+                  else
+                    echo "WARN: excluding ${e} from apply on pr"
+                  fi
+                else 
+                  echo "WARN: excluding ${e} from apply"
+                fi
+              else
+                echo "WARN: excluding ${e} from matrix"
+              fi
+            done
+          else 
+            echo "INFO: using single environment ${{ inputs.environment }}"
+
+            DEFAULT_LIST="\"${{ inputs.environment }}\""
+            APPLY_LIST=""
+            APPLY_ON_PR_LIST=""
+          
+            if [[ "${{ inputs.run-id }}" != "" ]]; then
+              APPLY_LIST="\"${{ inputs.environment }}\""
+            else 
+              for p in $(echo ${{ inputs.apply }} | tr "," "\n"); do
+                if [[ "${{ inputs.environment }}" =~ ^${p}$ ]]; then          
+                  APPLY_LIST="\"${{ inputs.environment }}\""
+                fi
+              done
+              
+              if [[ "${APPLY_LIST}" != "" ]]; then
+                for p in $(echo ${{ inputs.apply-on-pr }} | tr "," "\n"); do
+                  if [[ "${{ inputs.environment }}" =~ ^${p}$ ]]; then
+                    APPLY_ON_PR_LIST="${{ inputs.environment }}"
+                  fi
+                done          
+              fi
+            fi
+          fi
+   
+          echo "default_matrix={\"environment\": [${DEFAULT_LIST}]}" >> "$GITHUB_OUTPUT"
+          echo "apply_matrix={\"environment\": [${APPLY_LIST}]}" >> "$GITHUB_OUTPUT"                    
+          echo "apply_on_pr=${APPLY_ON_PR_LIST}" >> "$GITHUB_OUTPUT"                    
+          echo "INFO: default environment list ${DEFAULT_LIST}"
+          echo "INFO: apply environment list ${APPLY_LIST}"
+          echo "INFO: apply on PR environment list ${APPLY_ON_PR_LIST}"
+
+  validate:
+    if: ${{ always() && (inputs.mode == 'validate' || inputs.skip-validate == 'no') && inputs.run-id == '' }}
+    uses: ./.github/workflows/terraform-validate.yaml
+    secrets: inherit
+    with:
+      auto-commit: ${{ inputs.disable-auto-commit == 'no' && 'yes' || 'no' }}
+
+  plan:
+    if: ${{ always() && inputs.mode != 'output' && inputs.run-id == '' && needs.matrix.result == 'success' && (needs.validate.result == 'success' || needs.validate.result == 'skipped') }}
+    needs:
+      - matrix
+      - validate
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.default_matrix) }}
+    uses: ./.github/workflows/terraform-plan.yaml
+    secrets: inherit
+    with:
+      environment: ${{ matrix.environment }}
+      provider: ${{ inputs.provider }}
+      role: ${{ inputs.role }}
+      tf-init-args: ${{ inputs.tf-init-args }}
+      tf-plan-args: ${{ inputs.tf-plan-args }}
+      ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+  # show terraform plan output inline and as a PR comment
+  show:
+    if: ${{ always() && inputs.mode != 'output' && inputs.run-id == '' && needs.plan.result == 'success' }}
+    needs:
+      - matrix
+      - plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.default_matrix) }}
+    uses: ./.github/workflows/terraform-show.yaml
+    secrets: inherit
+    with:
+      environment: ${{ matrix.environment }}
+      mode: ${{ inputs.comment-mode }}
+      report: ${{ inputs.report-plan-result }}
+      ssh-private-key: ${{ inputs.ssh-private-key }}
+
+  # apply a plan
+  # event restrictions:
+  # - push: only allow if the push is on the default branch
+  # - workflow_dispatch: only allow if 'run-id' is set
+  apply:
+    if: ${{ always() && inputs.mode == 'apply' && ((inputs.run-id == '' && needs.plan.result == 'success') || (inputs.run-id != '' && needs.plan.result == 'skipped')) && (needs.validate.result == 'success' || needs.validate.result == 'skipped') && ((github.event_name == 'pull_request' && inputs.apply-on-pr != '') || (github.event_name == 'push' && github.event.repository.default_branch == github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.run-id != '')) }}
+    needs:
+      - matrix
+      - validate
+      - plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.apply_matrix) }}
+    uses: ./.github/workflows/terraform-apply.yaml
+    secrets: inherit
+    with:
+      environment: ${{ matrix.environment }}
+      provider: ${{ inputs.provider }}
+      role: ${{ inputs.role }}
+      tf-init-args: ${{ inputs.tf-init-args }}
+      run-id: ${{ inputs.run-id == '' && github.run_id || inputs.run-id }}
+      report: ${{ inputs.report-apply-result }}
+      on-pr: ${{ needs.matrix.outputs.apply_on_pr }}
+      ssh-private-key: ${{ inputs.ssh-private-key }}
+
+  # upload current state output
+  output:
+    if: ${{ always() && ((inputs.mode == 'apply' && needs.apply.result == 'success') || (inputs.mode == 'output' && needs.apply.result == 'skipped')) }}
+    needs:
+      - matrix
+      - apply
+    strategy:
+      fail-fast: false
+      matrix: ${{ inputs.mode == 'apply' && fromJSON(needs.matrix.outputs.apply_matrix) || fromJSON(needs.matrix.outputs.default_matrix) }}
+    uses: ./.github/workflows/terraform-output.yaml
+    secrets: inherit
+    with:
+      environment: ${{ matrix.environment }}
+      provider: ${{ inputs.provider }}
+      role: ${{ inputs.role }}
+      tf-init-args: ${{ inputs.tf-init-args }}
+      report: ${{ inputs.report-output }}
+      load-apply-artifact: ${{ needs.apply.result == 'success' && 'yes' || 'no' }}

@@ -1,0 +1,268 @@
+name: Apply a plan from artifact
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        type: string
+      provider:
+        description: 'The terraform provider'
+        required: false
+        type: string
+        default: 'aws'
+      role:
+        description: 'Role name'
+        required: false
+        type: string
+      tf-init-args:
+        description: 'Terraform init arguments'
+        required: false
+        type: string
+        default: ''
+      run-id:
+        description: 'The run id of the plan run to apply'
+        required: true
+        type: string
+      report:
+        description: 'Weather to report plan result to slack'
+        required: false
+        type: string
+        default: 'no'
+      on-pr:
+        description: 'A comma separated list of environments allowed to be applied on PRs'
+        required: false
+        type: string
+        default: ''
+      gh-token:
+        description: 'Github token to download artifacts from different runs'
+        required: false
+        type: string
+        default: ${{ secrets.GITHUB_TOKEN }}
+      ssh-private-key:
+        description: 'SSH private key'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  check:
+    name: Check apply ${{ inputs.environment }}
+    continue-on-error: true
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    outputs:
+      allow_result: ${{ steps.allowed.outputs.result }}
+      allow_message: ${{ steps.allowed.outputs.message }}
+      plan_result: ${{ steps.plan.outputs.result }}
+      allow_pr: ${{ steps.pr.outputs.result && steps.pr.outputs.result || 'allowed' }}
+    steps:
+      - name: Check PR allowed
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          for p in $(echo ${{ inputs.on-pr }} | tr "," "\n"); do
+            if [[ "${{ inputs.environment }}" == "${p}" ]]; then
+              echo "result=allowed" >> "$GITHUB_OUTPUT"
+              echo "INFO: ${{ inputs.environment }} is allowed to be applied on PRs"
+              exit 0  
+            fi      
+          done
+
+          echo "result=denied" >> "$GITHUB_OUTPUT"
+          echo "ERROR: ${{ inputs.environment }} is not allowed to be applied on PRs"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-plan
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ inputs.gh-token }}
+      - name: Check plan result
+        id: plan
+        run: |
+          if [ -f "${{ inputs.environment }}-plan-result.txt" ]; then
+            RESULT="$(cat ${{ inputs.environment }}-plan-result.txt)"
+          else
+            RESULT="missing"
+          fi          
+          echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+
+          LEVEL="INFO"          
+          if [[ "${RESULT}" == "error" || "${RESULT}" == "missing" ]]; then
+              LEVEL="ERROR"
+          fi
+          echo "${LEVEL}: Plan result was ${RESULT}"
+          
+
+  apply:
+    name: Apply ${{ inputs.environment }}
+    needs:
+      - check
+    if: ${{ always() && needs.check.result == 'success' && needs.check.outputs.plan_result != 'error' && needs.check.outputs.plan_result != 'missing' && needs.check.outputs.allow_result == 'allowed' && needs.check.outputs.allow_pr == 'allowed' }}
+    continue-on-error: true
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.apply.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-plan
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ inputs.gh-token }}
+      - if: ${{ inputs.provider == 'aws' && inputs.role }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TF_VERSION && vars.TF_VERSION || 'latest' }}
+      - if: ${{ inputs.ssh-private-key != '' }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ inputs.ssh-private-key }}
+
+      - name: Init
+        run: |
+          terraform init ${{ inputs.tf-init-args }}
+          terraform workspace select ${{ inputs.environment }} || terraform workspace new ${{ inputs.environment }}
+
+      - name: Apply
+        id: apply
+        run: |
+          terraform apply ${{ inputs.environment }}-plan.tfplan
+          case $? in 
+            0)
+              echo success > ${{ inputs.environment }}-apply-result.txt
+              echo INFO: Successfully applied environment ${{ inputs.environment }}
+              exit 0
+              ;;
+            *)
+              echo failure > ${{ inputs.environment }}-apply-result.txt
+              echo ERROR: Failed to apply environment ${{ inputs.environment }}
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-apply
+          path: ${{ inputs.environment }}-apply*.*
+          if-no-files-found: 'error'
+
+  report:
+    name: Report apply results ${{ inputs.environment }}
+    if: ${{ always() && inputs.report == 'yes' }}
+    continue-on-error: true
+    needs:
+      - check
+      - apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack notify
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Terraform apply",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Event:*\n${{ github.event_name }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\n${{ inputs.environment }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Ref:*\n${{ github.ref }}"
+                    }
+                  ]
+                },
+            	{
+                  "type": "divider"
+                },            
+                {
+                  "type": "rich_text",
+                  "elements": [
+                    {
+                      "type": "rich_text_section",
+                      "elements": [
+                        {
+                          "type": "emoji",
+                          "name": "${{ needs.check.outputs.allow_result == 'success' && 'rocket' || 'woman-facepalming' }}"
+                        },
+                        {
+                          "type": "text",
+                          "text": " ${{ needs.check.outputs.allow_message }}",
+                          "style": {
+                            "bold": true
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },                  
+                {
+                  "type": "rich_text",
+                  "elements": [
+                    {
+                      "type": "rich_text_section",
+                      "elements": [
+                        {
+                          "type": "emoji",
+                          "name": "${{ (needs.check.outputs.result == 'success' && needs.apply.result == 'success') && 'rocket' || 'woman-facepalming' }}"
+                        },
+                        {
+                          "type": "text",
+                          "text": " ${{ (needs.check.outputs.result == 'success' && needs.apply.result == 'success') && 'Successfull' || 'Error' }}",
+                          "style": {
+                            "bold": true
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+            	{
+                  "type": "divider"
+                },            
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+                  }
+                }            
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

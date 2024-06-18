@@ -1,0 +1,95 @@
+name: Create and store plan artifact
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        type: string
+      provider:
+        description: 'The terraform provider'
+        required: false
+        type: string
+        default: 'aws'
+      role:
+        description: 'Role name'
+        required: false
+        type: string
+      tf-init-args:
+        description: 'Terraform init arguments'
+        required: false
+        type: string
+        default: ''
+      tf-plan-args:
+        description: 'Terraform plan arguments'
+        required: false
+        type: string
+        default: ''
+      ssh-private-key:
+        description: 'SSH private key'
+        required: false
+        type: string
+        default: ${{ secrets.ACTIONS_GITHUB_PRIVATE_KEY }}
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Plan ${{ inputs.environment }}
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.plan.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ inputs.provider == 'aws' && inputs.role }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+      - if: ${{ inputs.ssh-private-key != '' }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ inputs.ssh-private-key }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TF_VERSION && vars.TF_VERSION || 'latest' }}
+
+      - name: Init
+        run: |
+          terraform init ${{ inputs.tf-init-args }}
+          terraform workspace select ${{ inputs.environment }} || terraform workspace new ${{ inputs.environment }}
+
+      - name: Plan
+        id: plan
+        run: |
+          terraform plan -lock=true -input=false -out '${{ inputs.environment }}-plan.tfplan' -detailed-exitcode ${{ inputs.tf-plan-args }}
+          
+          case $? in 
+            0)
+              echo success > ${{ inputs.environment }}-plan-result.txt
+              echo INFO: Successfully planned environment ${{ inputs.environment }}
+              exit 0
+              ;;
+            1)
+              echo error > ${{ inputs.environment }}-plan-result.txt
+              echo ERROR: Failed to plan environment ${{ inputs.environment }}
+              exit 1
+              ;;
+            2)
+              echo changes > ${{ inputs.environment }}-plan-result.txt
+              echo INFO: Successfully planned environment ${{ inputs.environment }}
+              exit 0
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.plan.outcome == 'success' }}
+        with:
+          name: ${{ inputs.environment }}-plan
+          path: ${{ inputs.environment }}-plan*.*
+          if-no-files-found: 'error'

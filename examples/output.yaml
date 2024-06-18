@@ -1,0 +1,34 @@
+#
+# This workflow will upload the outputs for all environments to the run artifacts
+#
+
+name: Terraform Output
+
+run-name: Output for ${{ github.event.inputs.all && 'all environments' || github.event.inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      all:
+        description: 'use all environments'
+        type: boolean
+        default: false
+
+      environment:
+        description: 'Environment'
+        type: environment
+        default: 'service-test'
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  terraform:
+    uses: Schumann-IT/terraform-gh-workflows/.github/workflows/terraform.yaml@main
+    secrets: inherit
+    with:
+      environment: ${{ github.event.inputs.all && 'all' || github.event.inputs.environment }}
+      mode: 'output'
+      skip-validate: 'yes'

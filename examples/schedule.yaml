@@ -1,0 +1,27 @@
+#
+# Periodically create plans for all environments and report the results to slack
+#
+
+name: Terraform Plan
+
+# update the run-name to reflect the default branch
+run-name: Scheduled plan for all environments based on branch main
+
+on:
+  schedule:
+    - cron: "15 3 * * MON-FRI"
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  terraform:
+    uses: Schumann-IT/terraform-gh-workflows/.github/workflows/terraform.yaml@main
+    secrets: inherit
+    with:
+      environment: all
+      mode: plan
+      skip-validate: yes
+      report-plan-result: yes
