@@ -1,0 +1,36 @@
+name: Update Changelog
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  changelog:
+    if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: '0'
+      - name: update-changelog
+        run: |
+          MAJOR_VERSION=$(ls | grep CHANGELOG |  cut -d'-' -f 2 | cut -f 1 -d '.' |  grep v | sort -V -r | head -n 1)
+          if [ -z "$MAJOR_VERSION" ]; then
+            MAJOR_VERSION=0
+          else
+            MAJOR_VERSION=${MAJOR_VERSION#"v"}
+            MAJOR_VERSION=$((MAJOR_VERSION+1))
+          fi
+          
+          previous_tag=$(docker run -e MAJOR_VERSION=$MAJOR_VERSION --rm mcr.microsoft.com/azterraform:latest previousTag ${{ github.repository_owner }} ${{ github.event.repository.name }} $MAJOR_VERSION.0.0)
+          if [ -z $previous_tag ]; then
+            docker run --rm -v $(pwd):/src -w /src githubchangeloggenerator/github-changelog-generator -u ${{ github.repository_owner }} -p ${{ github.event.repository.name }} -t ${{ secrets.GITHUB_TOKEN }} --no-issues --no-compare-link
+          else
+            docker run --rm -v $(pwd):/src -w /src githubchangeloggenerator/github-changelog-generator -u ${{ github.repository_owner }} -p ${{ github.event.repository.name }} -t ${{ secrets.GITHUB_TOKEN }} --no-issues --no-compare-link --since-tag=$previous_tag
+          fi
+          sudo chmod -R ugo+rwX .
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: update changelog'
