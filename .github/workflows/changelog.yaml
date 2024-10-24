@@ -8,11 +8,12 @@ permissions:
 
 jobs:
   changelog:
-    if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+    if: ${{ github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: '0'
       - name: update-changelog
         run: |
@@ -33,4 +34,5 @@ jobs:
           sudo chmod -R ugo+rwX .
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
+          branch: ${{ github.event.repository.default_branch }}
           commit_message: 'chore: update changelog'
