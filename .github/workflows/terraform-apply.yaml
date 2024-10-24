@@ -39,7 +39,7 @@ on:
         description: 'Github token to download artifacts from different runs'
         required: false
         type: string
-        default: ${{ secrets.GITHUB_TOKEN }}
+        default: ''
       ssh-private-key:
         description: 'SSH private key'
         required: false
@@ -81,7 +81,7 @@ jobs:
         with:
           name: ${{ inputs.environment }}-plan
           run-id: ${{ inputs.run-id }}
-          github-token: ${{ inputs.gh-token }}
+          github-token: ${{ inputs.gh-token && inputs.gh-token || secrets.GITHUB_TOKEN }}
       - name: Check plan result
         id: plan
         run: |
@@ -115,7 +115,7 @@ jobs:
         with:
           name: ${{ inputs.environment }}-plan
           run-id: ${{ inputs.run-id }}
-          github-token: ${{ inputs.gh-token }}
+          github-token: ${{ inputs.gh-token && inputs.gh-token || secrets.GITHUB_TOKEN }}
       - if: ${{ inputs.provider == 'aws' && inputs.role }}
         uses: aws-actions/configure-aws-credentials@v4
         with:

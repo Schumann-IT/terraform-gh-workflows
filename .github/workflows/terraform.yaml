@@ -107,7 +107,7 @@ on:
         description: 'SSH private key'
         required: false
         type: string
-        default: ${{ secrets.SSH_PRIVATE_KEY }}
+        default: ''
 
 permissions:
   id-token: write
@@ -243,7 +243,7 @@ jobs:
       role: ${{ inputs.role }}
       tf-init-args: ${{ inputs.tf-init-args }}
       tf-plan-args: ${{ inputs.tf-plan-args }}
-      ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      ssh-private-key: ${{ inputs.ssh-private-key }}
 
   # show terraform plan output inline and as a PR comment
   show:

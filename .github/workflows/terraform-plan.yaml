@@ -30,7 +30,7 @@ on:
         description: 'SSH private key'
         required: false
         type: string
-        default: ${{ secrets.ACTIONS_GITHUB_PRIVATE_KEY }}
+        default: ''
 
 permissions:
   id-token: write

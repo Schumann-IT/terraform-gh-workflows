@@ -19,7 +19,7 @@ on:
         description: 'Github token to update PR comments'
         required: false
         type: string
-        default: ${{ secrets.GITHUB_TOKEN }}
+        default: ''
       report:
         description: 'Weather to report plan result to slack'
         required: false
@@ -98,7 +98,7 @@ jobs:
         if: ${{ always() && inputs.mode == 'upsert' }}
         uses: actions/github-script@v7
         with:
-          github-token: ${{ inputs.gh-token }}
+          github-token: ${{ inputs.gh-token && inputs.gh-token || secrets.GITHUB_TOKEN }}
           script: |
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -146,7 +146,7 @@ jobs:
         if: ${{ always() && inputs.mode == 'create' && steps.show.outcome == 'success' }}
         uses: actions/github-script@v7
         with:
-          github-token: ${{ inputs.gh-token }}
+          github-token: ${{ inputs.gh-token && inputs.gh-token || secrets.GITHUB_TOKEN }}
           script: |
             const output = `### ${{ inputs.environment }} plan
             *Run:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
