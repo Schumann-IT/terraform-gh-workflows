@@ -15,6 +15,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: '0'
+          fetch-tags: true
       - name: update-changelog
         run: |
           MAJOR_VERSION=$(ls | grep CHANGELOG |  cut -d'-' -f 2 | cut -f 1 -d '.' |  grep v | sort -V -r | head -n 1)
@@ -25,7 +26,21 @@ jobs:
             MAJOR_VERSION=$((MAJOR_VERSION+1))
           fi
           
-          previous_tag=$(docker run -e MAJOR_VERSION=$MAJOR_VERSION --rm mcr.microsoft.com/azterraform:latest previousTag ${{ github.repository_owner }} ${{ github.event.repository.name }} $MAJOR_VERSION.0.0)
+          
+          previousTag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname |
+            awk -v mv="$MAJOR_VERSION" '
+              {
+                t = $0
+                sub(/^v/, "", t)
+                split(t, a, ".")
+                # filter tags matching the specified major version and return the latest (first match)
+                if (a[1]+0 == mv+0) {
+                  print $0
+                  exit
+                }
+              }
+            ' || true)
+
           if [ -z $previous_tag ]; then
             docker run --rm -v $(pwd):/src -w /src githubchangeloggenerator/github-changelog-generator -u ${{ github.repository_owner }} -p ${{ github.event.repository.name }} -t ${{ secrets.GITHUB_TOKEN }} --no-issues --no-compare-link
           else
